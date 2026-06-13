@@ -1,3 +1,4 @@
+python
 import json
 import time
 import argparse
@@ -29,7 +30,7 @@ RESERVE_NEXT_DAY = True
 
 
 def prepare_all(users, usernames, passwords, action):
-    """提前登录并拿好token，返回预热好的session列表"""
+    """提前登录，不拿token"""
     current_dayofweek = get_current_dayofweek(action)
     prepared = []
     for index, user in enumerate(users):
@@ -44,7 +45,7 @@ def prepare_all(users, usernames, passwords, action):
         if current_dayofweek not in daysofweek:
             prepared.append(None)
             continue
-        logging.info(f"----------- 预热 {username} -- {times} -- {seatid} -----------")
+        logging.info(f"----------- 预热登录 {username} -- {times} -- {seatid} -----------")
         s = reserve(
             sleep_time=SLEEPTIME,
             max_attempt=MAX_ATTEMPT,
@@ -54,26 +55,18 @@ def prepare_all(users, usernames, passwords, action):
         s.get_login_status()
         s.login(username, password)
         s.requests.headers.update({"Host": "office.chaoxing.com"})
-        # 提前拿token
-        token_map = {}
-        for seat in seatid:
-            url = s.url.format(roomid, seat)
-            token, value = s._get_page_token(url, require_value=True)
-            token_map[seat] = (token, value)
-            logging.info(f"预热拿到 seat={seat} token={token}")
         prepared.append({
             "s": s,
             "times": times,
             "roomid": roomid,
             "seatid": seatid,
-            "token_map": token_map,
             "action": action,
         })
     return prepared
 
 
 def submit_all(prepared, success_list):
-    """08:00整直接用已有token提交"""
+    """实时拿token并立刻提交"""
     for index, item in enumerate(prepared):
         if item is None or success_list[index]:
             continue
@@ -81,10 +74,10 @@ def submit_all(prepared, success_list):
         times = item["times"]
         roomid = item["roomid"]
         seatid = item["seatid"]
-        token_map = item["token_map"]
         action = item["action"]
         for seat in seatid:
-            token, value = token_map.get(seat, ("", ""))
+            url = s.url.format(roomid, seat)
+            token, value = s._get_page_token(url, require_value=True)
             if not token:
                 logging.warning(f"seat={seat} token为空，跳过")
                 continue
@@ -99,11 +92,8 @@ def submit_all(prepared, success_list):
                 value=value,
             )
             if suc:
-                logging.info(f"✅ 预约成功！seat={seat} times={times} roomid={roomid}")
                 success_list[index] = True
                 break
-            else:
-                logging.warning(f"❌ 预约失败 seat={seat} times={times}，继续尝试下一座位...")
     return success_list
 
 
@@ -119,11 +109,9 @@ def main(users, action=False):
     )
     success_list = [False] * len(users)
 
-    # 用预热好的数据提交
     prepared = prepare_all(users, usernames, passwords, action)
-    logging.info("预热完成，等待08:00整提交...")
+    logging.info("预热登录完成，等待08:00整提交...")
 
-    # 等到08:00整
     while True:
         current_time = get_current_time(action)
         if current_time >= "08:00:00":
@@ -135,16 +123,11 @@ def main(users, action=False):
     while current_time < ENDTIME:
         attempt_times += 1
         success_list = submit_all(prepared, success_list)
-        # ✅ 修复：改用 logging.info 替代 print，确保 GitHub Actions 日志可见
         logging.info(f"attempt time {attempt_times}, time now {current_time}, success list {success_list}")
         current_time = get_current_time(action)
         if sum(success_list) == today_reservation_num:
-            logging.info("reserved successfully!")  # ✅ 修复：同上
+            logging.info("reserved successfully!")
             return
-        # token用完了重新拿
-        if attempt_times % 3 == 0:
-            logging.info("重新获取token...")
-            prepared = prepare_all(users, usernames, passwords, action)
         time.sleep(SLEEPTIME)
 
 
@@ -209,7 +192,7 @@ if __name__ == "__main__":
 
     if wait > 30:
         logging.info(f"距离北京时间 08:00:00 还有 {wait} 秒，等待中...")
-        time.sleep(wait - 30)  # 提前30秒唤醒预热
+        time.sleep(wait - 30)
         logging.info("提前30秒开始预热...")
     elif wait > 0:
         logging.info(f"距离08:00不足30秒，立即预热...")
