@@ -1,4 +1,3 @@
-python
 import json
 import time
 import argparse
@@ -190,12 +189,13 @@ if __name__ == "__main__":
     current_seconds = beijing_struct.tm_hour * 3600 + beijing_struct.tm_min * 60 + beijing_struct.tm_sec
     wait = target_seconds - current_seconds
 
-    if wait > 30:
+    # 🟢 终极优化：更改提前唤醒时间为 3 秒，避免过度空转与 Token 提前老化
+    if wait > 3:
         logging.info(f"距离北京时间 08:00:00 还有 {wait} 秒，等待中...")
-        time.sleep(wait - 30)
-        logging.info("提前30秒开始预热...")
+        time.sleep(wait - 3)
+        logging.info("提前 3 秒开始预热登录...")
     elif wait > 0:
-        logging.info(f"距离08:00不足30秒，立即预热...")
+        logging.info(f"距离08:00不足 3 秒，立即预热登录...")
     else:
         logging.info("已过北京时间 08:00:00，立即执行")
 
