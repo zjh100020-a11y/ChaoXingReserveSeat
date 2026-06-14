@@ -111,29 +111,36 @@ def main(users, action=False):
     logging.info(f"[main] 今日待预约 {today_reservation_num}/{len(users)} 人")
 
     prepared = prepare_all(users, usernames, passwords, action)
-    logging.info("[main] 预热登录完成，等待 08:00:00 整点提交...")
 
-    while True:
-        current_time = get_current_time(action)
-        if current_time >= "08:00:00":
-            break
-        time.sleep(0.1)
+    # 如果已过 08:00，跳过等待直接提交
+    if current_time < "08:00:00":
+        logging.info("[main] 预热登录完成，等待 08:00:00 整点提交...")
+        while True:
+            current_time = get_current_time(action)
+            if current_time >= "08:00:00":
+                break
+            time.sleep(0.1)
+    else:
+        logging.info("[main] 预热登录完成，已过 08:00，立即尝试提交...")
 
-    logging.info("[main] ⏰ 08:00 整，开始提交！")
+    logging.info("[main] ⏰ 开始提交！")
     attempt_times = 0
-    while current_time < ENDTIME:
+    # do-while 模式：至少执行一轮，方便手动触发时验证 token 是否可获取
+    while True:
         attempt_times += 1
         success_list = submit_all(prepared, success_list)
         done = sum(success_list)
+        current_time = get_current_time(action)
         logging.info(f"[main] 第{attempt_times}轮 {current_time}, "
                      f"已完成 {done}/{today_reservation_num}, 状态={success_list}")
-        current_time = get_current_time(action)
         if done == today_reservation_num:
             logging.info(f"[main] 🎉 全部预约成功！共 {attempt_times} 轮")
             return
+        if current_time >= ENDTIME:
+            logging.warning(f"[main] ⚠️ 已到截止时间 {ENDTIME}，"
+                           f"尚有 {today_reservation_num - done} 人未成功")
+            return
         time.sleep(SLEEPTIME)
-    logging.warning(f"[main] ⚠️ 已到截止时间 {ENDTIME}，"
-                   f"尚有 {today_reservation_num - sum(success_list)} 人未成功")
 
 
 def debug(users, action=False):
