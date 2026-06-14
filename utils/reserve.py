@@ -116,9 +116,10 @@ class reserve:
                             logging.debug(f"[token] value 匹配到正则: {regex[:40]}...")
                             break
                     if not value:
+                        all_values = re.findall(r'value="(.*?)"', html)
                         logging.warning(
-                            f"[token] 所有正则为 algorithm 均未匹配, "
-                            f"HTML中所有value片段: {re.findall(r'value=\"(.*?)\"', html)[:5]}"
+                            f"[token] 所有 algorithm 正则均未匹配, "
+                            f"页面 value 片段(前5): {all_values[:5]}"
                         )
 
                 if token:
