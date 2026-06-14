@@ -44,7 +44,8 @@ def prepare_all(users, usernames, passwords, action):
         if current_dayofweek not in daysofweek:
             prepared.append(None)
             continue
-        logging.info(f"----------- 预热登录 {username} -- {times} -- {seatid} -----------")
+        logging.info(f"[prepare] ({index+1}/{len(users)}) 预热登录: user={username}, "
+                     f"times={times}, seatid={seatid}, roomid={roomid}")
         s = reserve(
             sleep_time=SLEEPTIME,
             max_attempt=MAX_ATTEMPT,
@@ -78,7 +79,7 @@ def submit_all(prepared, success_list):
             url = s.url.format(roomid, seat)
             token, value = s._get_page_token(url, require_value=True)
             if not token:
-                logging.warning(f"seat={seat} token为空，跳过")
+                logging.warning(f"[submit_all] seat={seat} token为空，跳过")
                 continue
             suc = s.get_submit(
                 s.submit_url,
@@ -98,7 +99,7 @@ def submit_all(prepared, success_list):
 
 def main(users, action=False):
     current_time = get_current_time(action)
-    logging.info(f"start time {current_time}, action {'on' if action else 'off'}")
+    logging.info(f"[main] 开始时间 {current_time}, 模式={'GitHub Action' if action else '本地'}")
     usernames, passwords = None, None
     if action:
         usernames, passwords = get_user_credentials(action)
@@ -107,9 +108,10 @@ def main(users, action=False):
         1 for d in users if current_dayofweek in d.get("daysofweek")
     )
     success_list = [False] * len(users)
+    logging.info(f"[main] 今日待预约 {today_reservation_num}/{len(users)} 人")
 
     prepared = prepare_all(users, usernames, passwords, action)
-    logging.info("预热登录完成，等待08:00整提交...")
+    logging.info("[main] 预热登录完成，等待 08:00:00 整点提交...")
 
     while True:
         current_time = get_current_time(action)
@@ -117,17 +119,21 @@ def main(users, action=False):
             break
         time.sleep(0.1)
 
-    logging.info("08:00整，开始提交！")
+    logging.info("[main] ⏰ 08:00 整，开始提交！")
     attempt_times = 0
     while current_time < ENDTIME:
         attempt_times += 1
         success_list = submit_all(prepared, success_list)
-        logging.info(f"attempt time {attempt_times}, time now {current_time}, success list {success_list}")
+        done = sum(success_list)
+        logging.info(f"[main] 第{attempt_times}轮 {current_time}, "
+                     f"已完成 {done}/{today_reservation_num}, 状态={success_list}")
         current_time = get_current_time(action)
-        if sum(success_list) == today_reservation_num:
-            logging.info("reserved successfully!")
+        if done == today_reservation_num:
+            logging.info(f"[main] 🎉 全部预约成功！共 {attempt_times} 轮")
             return
         time.sleep(SLEEPTIME)
+    logging.warning(f"[main] ⚠️ 已到截止时间 {ENDTIME}，"
+                   f"尚有 {today_reservation_num - sum(success_list)} 人未成功")
 
 
 def debug(users, action=False):
