@@ -72,75 +72,102 @@ class reserve:
         requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
     def _get_page_token(self, url, require_value=False):
-        # 先用requests快速尝试
-        try:
-            response = self.requests.get(url=url, verify=False)
-            html = response.content.decode("utf-8")
-            matches = re.findall(r'id="submit_enc"\s+value="(.*?)"', html)
-            if matches:
-                value_matches = re.findall(r'value="(.*?)"', html) if require_value else None
-                logging.info("requests直接拿到token")
-                return matches[0], value_matches[0] if value_matches else ""
-        except Exception as e:
-            logging.warning(f"requests failed: {e}")
-
-        # 拿不到再用Playwright
-        logging.warning("Falling back to Playwright...")
-        from playwright.sync_api import sync_playwright
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            context = browser.new_context()
-            cookies = [
-                {"name": c.name, "value": c.value, "domain": c.domain, "path": c.path}
-                for c in self.requests.cookies
-            ]
-            context.add_cookies(cookies)
-            page = context.new_page()
+        """通过 GET 获取 token 与 algorithm 值，失败时自动重试"""
+        fetch_headers = {
+            "Referer": "https://office.chaoxing.com/",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Host": "office.chaoxing.com",
+        }
+        max_retries = 5
+        for attempt in range(1, max_retries + 1):
             try:
-                page.goto(url, wait_until="networkidle", timeout=60000)
+                resp = self.requests.get(
+                    url=url, headers=fetch_headers, timeout=15, verify=False
+                )
+                if resp.status_code != 200:
+                    logging.warning(
+                        f"[token] 第{attempt}次 GET 返回 HTTP {resp.status_code}, url={url}"
+                    )
+                    if attempt < max_retries:
+                        time.sleep(self.sleep_time * attempt)
+                    continue
+
+                html = resp.content.decode("utf-8")
+                logging.debug(f"[token] 第{attempt}次响应长度={len(html)}")
+
+                # 提取 submit_enc → token
+                token_match = re.findall(r'id="submit_enc"\s+value="(.*?)"', html)
+                token = token_match[0] if token_match else ""
+
+                # 提取 algorithm → value（多模式回退，应对页面结构变化）
+                value = ""
+                if require_value:
+                    for regex in (
+                        r'id="algorithm"\s+value="(.*?)"',
+                        r'name="algorithm"\s+value="(.*?)"',
+                        # 兜底：匹配第一个含 value 的 input，避免拿不到值
+                        r'<input[^>]+value="(.*?)"',
+                    ):
+                        m = re.findall(regex, html)
+                        if m:
+                            value = m[0]
+                            logging.debug(f"[token] value 匹配到正则: {regex[:40]}...")
+                            break
+                    if not value:
+                        logging.warning(
+                            f"[token] 所有正则为 algorithm 均未匹配, "
+                            f"HTML中所有value片段: {re.findall(r'value=\"(.*?)\"', html)[:5]}"
+                        )
+
+                if token:
+                    logging.info(
+                        f"[token] 第{attempt}次成功, token_len={len(token)}, "
+                        f"value_len={len(value)}, url={url}"
+                    )
+                    return token, value
+
+                # token 为空：记录 HTML 片段便于排查
+                logging.warning(
+                    f"[token] 第{attempt}次未匹配到 token, "
+                    f"HTML预览(300字符): {html[:300]}"
+                )
+                if attempt < max_retries:
+                    time.sleep(self.sleep_time * attempt)
             except Exception as e:
-                logging.error(f"page.goto failed: {e}")
-                browser.close()
-                return "", ""
-            html = page.content()
-            browser.close()
-        matches = re.findall(r'id="submit_enc"\s+value="(.*?)"', html)
-        value_matches = None
-        if require_value:
-            value_matches = re.findall(r'value="(.*?)"', html)
-            if not matches:
-                logging.error(f"Failed to get token from {url}")
-                logging.error(f"Page response (500 chars): {html[:500]}")
-                return "", ""
-            if not value_matches:
-                logging.error(f"Failed to get submit value from {url}")
-                return matches[0], ""
-        return matches[0] if matches else "", value_matches[0] if value_matches else ""
+                logging.warning(f"[token] 第{attempt}次请求异常: {e}")
+                if attempt < max_retries:
+                    time.sleep(self.sleep_time * attempt)
+
+        logging.error(f"[token] 全部{max_retries}次重试均失败, url={url}")
+        return "", ""
 
     def get_login_status(self):
+        logging.info("[login] 获取登录页 Cookie...")
         self.requests.headers = self.login_headers
-        self.requests.get(url=self.login_page, verify=False)
+        resp = self.requests.get(url=self.login_page, verify=False)
+        logging.info(f"[login] 登录页 HTTP {resp.status_code}, cookie数量={len(self.requests.cookies)}")
 
     def login(self, username, password):
-        username = AES_Encrypt(username)
-        password = AES_Encrypt(password)
+        enc_username = AES_Encrypt(username)
+        enc_password = AES_Encrypt(password)
         parm = {
             "fid": -1,
-            "uname": username,
-            "password": password,
+            "uname": enc_username,
+            "password": enc_password,
             "refer": "http%3A%2F%2Foffice.chaoxing.com%2Ffront%2Fthird%2Fapps%2Fseat%2Fcode%3Fid%3D4219%26seatNum%3D380",
             "t": True,
         }
-        jsons = self.requests.post(url=self.login_url, params=parm, verify=False)
-        obj = jsons.json()
-        if obj["status"]:
-            logging.info(f"User {username} login successfully")
+        resp = self.requests.post(url=self.login_url, params=parm, verify=False)
+        obj = resp.json()
+        if obj.get("status"):
+            logging.info(f"[login] 用户 {username} 登录成功")
             return (True, "")
         else:
-            logging.info(
-                f"User {username} login failed. Please check you password and username! "
-            )
-            return (False, obj["msg2"])
+            msg = obj.get("msg2", obj.get("msg", "未知错误"))
+            logging.warning(f"[login] 用户 {username} 登录失败: {msg}")
+            return (False, msg)
 
     def roomid(self, encode):
         url = f"https://office.chaoxing.com/data/apps/seat/room/list?cpage=1&pageSize=100&firstLevelName=&secondLevelName=&thirdLevelName=&deptIdEnc={encode}"
@@ -259,18 +286,19 @@ class reserve:
     def submit(self, times, roomid, seatid, action):
         for seat in seatid:
             suc = False
-            while ~suc and self.max_attempt > 0:
+            remaining = self.max_attempt
+            while not suc and remaining > 0:
                 token, value = self._get_page_token(
                     self.url.format(roomid, seat), require_value=True
                 )
-                logging.info(f"Get token: {token}")
                 if not token:
-                    logging.warning("Token is empty, retrying page fetch...")
+                    logging.warning(f"[submit] seat={seat} token为空，等待重试...")
                     time.sleep(self.sleep_time)
-                    self.max_attempt -= 1
+                    remaining -= 1
                     continue
                 captcha = self.resolve_captcha() if self.enable_slider else ""
-                logging.info(f"Captcha token {captcha}")
+                if captcha:
+                    logging.info(f"[submit] 滑块验证码: {captcha[:20]}...")
                 suc = self.get_submit(
                     self.submit_url,
                     times=times,
@@ -284,8 +312,9 @@ class reserve:
                 if suc:
                     return suc
                 time.sleep(self.sleep_time)
-                self.max_attempt -= 1
-        return suc
+                remaining -= 1
+            logging.warning(f"[submit] seat={seat} 已耗尽所有尝试次数")
+        return False
 
     def get_submit(
         self, url, times, token, roomid, seatid, captcha="", action=False, value=""
@@ -305,13 +334,20 @@ class reserve:
             "type": "1",
             "verifyData": "1",
         }
-        logging.info(f"submit parameter {parm} ")
+        logging.info(f"[submit] 请求参数 roomId={roomid} seatNum={seatid} "
+                     f"day={day} {times[0]}~{times[1]}")
         parm["enc"] = verify_param(parm, value)
-        html = self.requests.post(url=url, params=parm, verify=True).content.decode(
-            "utf-8"
-        )
-        self.submit_msg.append(
-            times[0] + "~" + times[1] + ":  " + str(json.loads(html))
-        )
-        logging.info(json.loads(html))
-        return json.loads(html)["success"]
+        resp = self.requests.post(url=url, params=parm, verify=True)
+        html = resp.content.decode("utf-8")
+        try:
+            result = json.loads(html)
+        except json.JSONDecodeError:
+            logging.error(f"[submit] 响应非JSON, HTTP={resp.status_code}, 内容={html[:200]}")
+            return False
+        self.submit_msg.append(f"{times[0]}~{times[1]}: {result}")
+        success = result.get("success", False)
+        if success:
+            logging.info(f"[submit] ✅ 预约成功! {result}")
+        else:
+            logging.warning(f"[submit] ❌ 预约失败: {result}")
+        return success
