@@ -1,5 +1,6 @@
 import json
 import time
+import random
 import argparse
 import os
 import logging
@@ -91,6 +92,10 @@ def submit_all(prepared, success_list):
         return success_list
 
     def submit_one(index, item):
+        # 随机抖动 50~300ms，避免所有线程同时请求触发反爬
+        jitter = random.uniform(0.05, 0.3)
+        time.sleep(jitter)
+
         s = item["s"]
         times = item["times"]
         roomid = item["roomid"]
@@ -102,7 +107,7 @@ def submit_all(prepared, success_list):
             if not token:
                 logging.warning(f"[submit_all] seat={seat} token为空，跳过")
                 continue
-            suc = s.get_submit(
+            result = s.get_submit(
                 s.submit_url,
                 times=times,
                 token=token,
@@ -112,7 +117,22 @@ def submit_all(prepared, success_list):
                 action=action,
                 value=value,
             )
-            if suc:
+            if result == "RELOGIN":
+                # 会话过期已自动重登，重新获取token再试
+                logging.info(f"[submit_all] 用户{index} 重登成功，重试获取token...")
+                token2, value2 = s._get_page_token(url, require_value=True)
+                if token2:
+                    result = s.get_submit(
+                        s.submit_url,
+                        times=times,
+                        token=token2,
+                        roomid=roomid,
+                        seatid=seat,
+                        captcha="",
+                        action=action,
+                        value=value2,
+                    )
+            if result and result != "RELOGIN":
                 return index, True
         return index, False
 
