@@ -28,7 +28,7 @@ ENDTIME = "08:01:00"
 ENABLE_SLIDER = False
 MAX_ATTEMPT = 5
 RESERVE_NEXT_DAY = True
-MAX_WORKERS = 10  # 最大并行线程数，可根据需要调整
+MAX_WORKERS = 10  # 最大并行线程数（仅用于 prepare_all 登录阶段）
 
 
 def prepare_all(users, usernames, passwords, action):
@@ -59,12 +59,48 @@ def prepare_all(users, usernames, passwords, action):
         s.get_login_status()
         s.login(username, password)
         s.requests.headers.update({"Host": "office.chaoxing.com"})
+        # 预热：提前请求 token 页面，让服务器/CDN 缓存"热起来"
+        # 高峰期优化：实际尝试提取一次 token，确保 session 完全就绪
+        warmup_headers = {
+            "Referer": "https://office.chaoxing.com/",
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Host": "office.chaoxing.com",
+        }
+        for seat in seatid:
+            warmup_url = s.url.format(roomid, seat)
+            # 第一阶段：快速 GET 预热 CDN
+            try:
+                s.requests.get(
+                    url=warmup_url,
+                    headers=warmup_headers,
+                    timeout=5,
+                    verify=False,
+                )
+            except Exception:
+                pass
+            # 第二阶段：尝试真实 token 提取，验证 session 有效性
+            try:
+                token, _ = s._get_page_token(warmup_url, require_value=False)
+                if token:
+                    logging.info(
+                        f"[prepare] {username} seat={seat} 预热token获取成功, "
+                        f"len={len(token)}"
+                    )
+                else:
+                    logging.warning(
+                        f"[prepare] {username} seat={seat} 预热token为空，"
+                        f"将在正式提交时重试"
+                    )
+            except Exception:
+                pass  # 预热失败不影响主流程
         return index, {
             "s": s,
             "times": times,
             "roomid": roomid,
             "seatid": seatid,
             "action": action,
+            "username": username,
         }
 
     workers = min(MAX_WORKERS, len(users))
@@ -81,7 +117,7 @@ def prepare_all(users, usernames, passwords, action):
 
 
 def submit_all(prepared, success_list):
-    """并行提交预约，多个用户同时抢座，互不阻塞"""
+    """串行提交预约，逐个用户依次提交，避免并行导致 303 会话冲突"""
     # 收集当前轮需要提交的项（未成功且有效）
     pending = [
         (i, item)
@@ -91,61 +127,83 @@ def submit_all(prepared, success_list):
     if not pending:
         return success_list
 
-    def submit_one(index, item):
-        # 随机抖动 50~300ms，避免所有线程同时请求触发反爬
-        jitter = random.uniform(0.05, 0.3)
-        time.sleep(jitter)
-
+    total_pending = len(pending)
+    for pos, (index, item) in enumerate(pending):
         s = item["s"]
         times = item["times"]
         roomid = item["roomid"]
         seatid = item["seatid"]
         action = item["action"]
+        username = item.get("username", f"user{index}")
+
+        logging.info(
+            f"[submit_all] 串行提交 ({pos+1}/{total_pending}) user={username}"
+        )
+
         for seat in seatid:
             url = s.url.format(roomid, seat)
-            token, value = s._get_page_token(url, require_value=True)
-            if not token:
-                logging.warning(f"[submit_all] seat={seat} token为空，跳过")
-                continue
-            result = s.get_submit(
-                s.submit_url,
-                times=times,
-                token=token,
-                roomid=roomid,
-                seatid=seat,
-                captcha="",
-                action=action,
-                value=value,
-            )
-            if result == "RELOGIN":
-                # 会话过期已自动重登，重新获取token再试
-                logging.info(f"[submit_all] 用户{index} 重登成功，重试获取token...")
-                token2, value2 = s._get_page_token(url, require_value=True)
-                if token2:
-                    result = s.get_submit(
-                        s.submit_url,
-                        times=times,
-                        token=token2,
-                        roomid=roomid,
-                        seatid=seat,
-                        captcha="",
-                        action=action,
-                        value=value2,
+            # 每个 seat 最多 3 次尝试，每次重新获取 token 避免 303 超时
+            for attempt in range(1, 4):
+                # 每次尝试前（除首次外）刷新 session，确保 cookie 新鲜
+                if attempt > 1:
+                    logging.info(
+                        f"[submit_all] {username} seat={seat} "
+                        f"第{attempt}次尝试前刷新session..."
                     )
-            if result and result != "RELOGIN":
-                return index, True
-        return index, False
+                    try:
+                        s.get_login_status()
+                    except Exception:
+                        pass
+                    time.sleep(random.uniform(0.3, 0.8))
 
-    workers = min(MAX_WORKERS, len(pending))
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="submit") as executor:
-        futures = {executor.submit(submit_one, i, item): i for i, item in pending}
-        for future in as_completed(futures):
-            try:
-                idx, result = future.result()
-                if result:
-                    success_list[idx] = True
-            except Exception as e:
-                logging.error(f"[submit_all] 线程异常 index={futures[future]}: {e}")
+                token, value = s._get_page_token(url, require_value=True)
+                if not token:
+                    logging.warning(
+                        f"[submit_all] {username} seat={seat} token为空，跳过"
+                    )
+                    break
+                success, msg = s.get_submit(
+                    s.submit_url,
+                    times=times,
+                    token=token,
+                    roomid=roomid,
+                    seatid=seat,
+                    captcha="",
+                    action=action,
+                    value=value,
+                )
+                if success:
+                    success_list[index] = True
+                    logging.info(f"[submit_all] ✅ {username} 预约成功!")
+                    break
+                # 失败处理
+                if attempt < 3:
+                    retry_delay = random.uniform(0.3, 0.8)
+                    if "303" in (msg or ""):
+                        logging.info(
+                            f"[submit_all] {username} seat={seat} "
+                            f"第{attempt}次失败(303超时)，"
+                            f"刷新session并等待{retry_delay:.1f}s..."
+                        )
+                        try:
+                            s.get_login_status()
+                        except Exception:
+                            pass
+                    else:
+                        logging.info(
+                            f"[submit_all] {username} seat={seat} "
+                            f"第{attempt}次失败，刷新token重试..."
+                        )
+                    time.sleep(retry_delay)
+
+        # 用户间增加间隔，进一步降低 303 概率
+        remaining = total_pending - pos - 1
+        if remaining > 0:
+            interval = random.uniform(0.5, 1.5)
+            logging.debug(
+                f"[submit_all] 用户间间隔 {interval:.1f}s, 剩余 {remaining} 人"
+            )
+            time.sleep(interval)
 
     return success_list
 
